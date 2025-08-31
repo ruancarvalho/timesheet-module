@@ -1,0 +1,15 @@
+<mat-form-field class="task-field" appearance="outline">
+  <mat-label>Add task</mat-label>
+  <input matInput [formControl]="search" [matAutocomplete]="auto" placeholder="Search by name/code" />
+  <mat-autocomplete #auto="matAutocomplete" [displayWith]="display.bind(this)" (optionSelected)="choose($event.option.value)">
+    <mat-option *ngFor="let t of results$ | async" [value]="t">
+      <div class="opt">
+        <span class="client">{{ t.project.client.name }}</span>
+        <span class="sep">/</span>
+        <span class="project">{{ t.project.name }}</span>
+        <span class="dot">•</span>
+        <span class="name">{{ t.name }}</span>
+      </div>
+    </mat-option>
+  </mat-autocomplete>
+</mat-form-field>

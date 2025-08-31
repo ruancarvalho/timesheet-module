@@ -1,0 +1,4 @@
+.page { display: flex; flex-direction: column; gap: 12px; }
+.toolbar { display: flex; align-items: center; gap: 12px; }
+.spacer { flex: 1; }
+.grid-wrapper { border: 1px solid rgba(0,0,0,.08); border-radius: 8px; padding: 8px; }

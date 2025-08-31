@@ -1,0 +1,4 @@
+.task-field { width: 420px; max-width: 100%; }
+.opt { display: flex; gap: 6px; align-items: baseline; }
+.sep, .dot { opacity: .6; }
+.client { font-weight: 600; }

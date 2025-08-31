@@ -1,0 +1,42 @@
+<div class="page">
+  <div class="toolbar">
+    <app-timesheet-week-nav
+      [week]="(vm$ | async)?.week"
+      [datesInWeek]="(vm$ | async)?.dates"
+      (weekChange)="onWeekChange($event)">
+    </app-timesheet-week-nav>
+
+    <span class="spacer"></span>
+
+    <mat-chip color="primary" selected>{{ (vm$ | async)?.status | titlecase }}</mat-chip>
+
+    <button mat-stroked-button (click)="saveDraft()" [disabled]="(vm$ | async)?.saving || !(vm$ | async)?.dirty">
+      <mat-icon>save</mat-icon>
+      Save Draft
+    </button>
+
+    <button mat-raised-button color="primary" (click)="submit()" [disabled]="!(validation$ | async)?.isValid || (vm$ | async)?.saving">
+      <mat-icon>check_circle</mat-icon>
+      Submit
+    </button>
+  </div>
+
+  <div class="actions">
+    <app-timesheet-task-selector (taskSelected)="onTaskSelected($event)"></app-timesheet-task-selector>
+  </div>
+
+  <section class="grid-wrapper" *ngIf="vm$ | async as vm">
+    <app-timesheet-grid
+      [dates]="vm.dates"
+      [rowOrder]="vm.rowOrder"
+      [taskById]="vm.taskById"
+      [cellByTaskDate]="vm.cellByTaskDate"
+      [totals]="vm.totals"
+      [status]="vm.status"
+      [validation]="(validation$ | async)!"
+      (cellEdit)="onCellEdit($event)"
+      (rowClear)="onRowClear($event)"
+      (bulkSet)="onBulkSet($event)">
+    </app-timesheet-grid>
+  </section>
+</div>
