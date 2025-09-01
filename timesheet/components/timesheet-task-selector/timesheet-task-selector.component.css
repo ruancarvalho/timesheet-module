@@ -1,4 +1,39 @@
-.task-field { width: 420px; max-width: 100%; }
-.opt { display: flex; gap: 6px; align-items: baseline; }
-.sep, .dot { opacity: .6; }
+.task-field {
+  width: 480px;
+  max-width: 100%;
+}
+
+.opt {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.line1 {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
 .client { font-weight: 600; }
+.sep, .dot { opacity: 0.6; }
+.name { font-weight: 500; }
+.code { opacity: 0.75; }
+
+.line2 {
+  display: flex;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.pill {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 10px;
+  border: 1px solid rgba(0,0,0,.15);
+}
+
+.pill.billable { border-color: rgba(76,175,80,.5); }
+.pill.nonbillable { border-color: rgba(244,67,54,.5); }
+.pill.muted { opacity: 0.6; }
