@@ -12,7 +12,11 @@ export class TimesheetGridComponent {
   @Input() rowOrder: string[] = [];
   @Input() taskById: Record<string, TaskRef> = {};
   @Input() cellByTaskDate: Record<string, Record<string, MDValue>> = {};
-  @Input() totals: { perDay: Record<string, number>; perTask: Record<string, number>; weekTotal: number } = { perDay: {}, perTask: {}, weekTotal: 0 };
+  @Input() totals: { perDay: Record<string, number>; perTask: Record<string, number>; weekTotal: number } = {
+    perDay: {},
+    perTask: {},
+    weekTotal: 0,
+  };
   @Input() status: 'draft' | 'submitted' = 'draft';
   @Input() validation: { isValid: boolean; issues: ValidationIssue[] } = { isValid: true, issues: [] };
 
@@ -20,9 +24,11 @@ export class TimesheetGridComponent {
   @Output() rowClear = new EventEmitter<{ taskId: string }>();
   @Output() bulkSet = new EventEmitter<{ taskId: string; dates: DateYMD[]; value: MDValue }>();
 
-  allowed: MDValue[] = [0, 0.25, 0.5, 0.75, 1];
+  readonly allowed: MDValue[] = [0, 0.25, 0.5, 0.75, 1];
 
-  valueOf(taskId: string, date: DateYMD): MDValue { return this.cellByTaskDate[taskId]?.[date] ?? 0; }
+  valueOf(taskId: string, date: DateYMD): MDValue {
+    return (this.cellByTaskDate[taskId]?.[date] ?? 0) as MDValue;
+  }
 
   onChange(taskId: string, date: DateYMD, next: any) {
     const v = Number(next) as MDValue;

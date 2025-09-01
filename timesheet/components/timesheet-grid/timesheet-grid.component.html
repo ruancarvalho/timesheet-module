@@ -1,48 +1,57 @@
 <div class="grid" *ngIf="dates?.length">
   <table mat-table [dataSource]="rowOrder" class="mat-elevation-z1">
-    <!-- Task Column -->
+
+    <!-- Task Column (header, cell, footer in same def) -->
     <ng-container matColumnDef="task">
       <th mat-header-cell *matHeaderCellDef class="sticky">Task</th>
       <td mat-cell *matCellDef="let taskId" class="sticky">
         <div class="task-cell">
           <div class="title">{{ taskById[taskId]?.name || taskId }}</div>
-          <div class="meta">{{ taskById[taskId]?.project?.client?.name }} / {{ taskById[taskId]?.project?.name }}</div>
+          <div class="meta">
+            {{ taskById[taskId]?.project?.client?.name }} / {{ taskById[taskId]?.project?.name }}
+          </div>
         </div>
-        <button mat-icon-button color="warn" (click)="rowClear.emit({ taskId })" [disabled]="status==='submitted'" matTooltip="Clear row">
+        <button
+          mat-icon-button
+          color="warn"
+          (click)="rowClear.emit({ taskId })"
+          [disabled]="status === 'submitted'"
+          matTooltip="Clear row">
           <mat-icon>clear</mat-icon>
         </button>
       </td>
+      <td mat-footer-cell *matFooterCellDef class="sticky">Totals</td>
     </ng-container>
 
     <!-- Dynamic Day Columns -->
     <ng-container *ngFor="let d of dates" [matColumnDef]="d">
-      <th mat-header-cell *matHeaderCellDef [class.invalid]="(totals.perDay[d]||0) > 1">{{ d }}</th>
+      <th mat-header-cell *matHeaderCellDef [class.invalid]="(totals.perDay[d] || 0) > 1">
+        {{ d }}
+      </th>
       <td mat-cell *matCellDef="let taskId">
-        <mat-select [disabled]="status==='submitted'" [value]="valueOf(taskId, d)" (selectionChange)="onChange(taskId, d, $event.value)" panelClass="md-panel">
+        <mat-select
+          [disabled]="status === 'submitted'"
+          [value]="valueOf(taskId, d)"
+          (selectionChange)="onChange(taskId, d, $event.value)"
+          panelClass="md-panel">
           <mat-option *ngFor="let v of allowed" [value]="v">{{ v }}</mat-option>
         </mat-select>
       </td>
+      <td mat-footer-cell *matFooterCellDef [class.invalid]="(totals.perDay[d] || 0) > 1">
+        {{ totals.perDay[d] || 0 }}
+      </td>
     </ng-container>
 
-    <!-- Row total -->
+    <!-- Row Total Column -->
     <ng-container matColumnDef="rowTotal">
       <th mat-header-cell *matHeaderCellDef>Total</th>
       <td mat-cell *matCellDef="let taskId">{{ totals.perTask[taskId] || 0 }}</td>
+      <td mat-footer-cell *matFooterCellDef>{{ totals.weekTotal }}</td>
     </ng-container>
 
     <tr mat-header-row *matHeaderRowDef="['task', ...dates, 'rowTotal']"></tr>
     <tr mat-row *matRowDef="let row; columns: ['task', ...dates, 'rowTotal'];"></tr>
-
-    <!-- Footer: day totals + week total -->
     <tr mat-footer-row *matFooterRowDef="['task', ...dates, 'rowTotal']" class="totals"></tr>
-    <ng-container matColumnDef="task">
-      <td mat-footer-cell *matFooterCellDef class="sticky">Totals</td>
-    </ng-container>
-    <ng-container *ngFor="let d of dates" [matColumnDef]="d">
-      <td mat-footer-cell *matFooterCellDef [class.invalid]="(totals.perDay[d]||0) > 1">{{ totals.perDay[d] || 0 }}</td>
-    </ng-container>
-    <ng-container matColumnDef="rowTotal">
-      <td mat-footer-cell *matFooterCellDef>{{ totals.weekTotal }}</td>
-    </ng-container>
+
   </table>
 </div>
