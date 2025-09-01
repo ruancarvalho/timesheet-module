@@ -3,13 +3,16 @@
     <mat-icon>chevron_left</mat-icon>
   </button>
 
-  <div class="label">
+  <div class="label" *ngIf="week as w">
     <strong>Week:</strong>
-    <span *ngIf="week as w">{{ w.isoYear }} - {{ w.isoWeek }}</span>
-    <span class="dates" *ngIf="datesInWeek?.length"> ({{ datesInWeek[0] }} — {{ datesInWeek[6] }})</span>
+    <span>{{ w.isoYear }} - {{ w.isoWeek }}</span>
+    <span class="dates" *ngIf="datesInWeek?.length === 7">
+      ({{ datesInWeek[0] }} — {{ datesInWeek[6] }})
+    </span>
   </div>
 
   <button mat-stroked-button (click)="today()">Today</button>
+
   <button mat-icon-button (click)="next()" matTooltip="Next week">
     <mat-icon>chevron_right</mat-icon>
   </button>

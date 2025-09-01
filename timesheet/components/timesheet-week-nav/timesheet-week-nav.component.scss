@@ -1,3 +1,15 @@
-.week-nav { display: flex; align-items: center; gap: 8px; }
-.label { display: flex; align-items: center; gap: 6px; }
-.dates { opacity: .7; }
+.week-nav {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.dates {
+  opacity: 0.7;
+}
