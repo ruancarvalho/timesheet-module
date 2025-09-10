@@ -1,9 +1,10 @@
 import { Injectable } from '@angular/core';
 import { ComponentStore } from '@ngrx/component-store';
-import { of } from 'rxjs';
+import { forkJoin, of } from 'rxjs';
 import { catchError, concatMap, exhaustMap, switchMap, tap } from 'rxjs/operators';
 import {
   DateYMD,
+  DayMetaMap,
   MDValue,
   TaskRef,
   TimesheetEntry,
@@ -12,22 +13,38 @@ import {
   UserRef,
   ValidationIssue,
   WeekId,
+  WeekNavItem,
 } from '../models/timesheet.models';
 import { TimesheetService } from '../services/timesheet.service';
+import { CalendarService } from '../services/calendar.service';
 
 export interface TimesheetStoreState {
   contextUser: UserRef | null;
   week: WeekId | null;
+
+  // frame
   status: TimesheetStatus;
   version: string;
   datesInWeek: DateYMD[];
+  forUser?: UserRef;
+
+  // data
   entries: TimesheetEntry[];
-  selectedTaskIds: string[];
   tasksById: Record<string, TaskRef>;
-  cellByTaskDate: Record<string, Record<string, MDValue>>; // taskId -> date -> value
+  selectedTaskIds: string[];
+
+  // derived
+  cellByTaskDate: Record<string, Record<string, MDValue>>;
   totalsPerDay: Record<string, number>;
   totalsPerTask: Record<string, number>;
   weekTotal: number;
+
+  // calendar & nav
+  dayMeta: DayMetaMap;
+  blockedDates: Record<DateYMD, true>;
+  weekNav: WeekNavItem[];
+
+  // ui
   loading: boolean;
   saving: boolean;
   dirty: boolean;
@@ -37,16 +54,25 @@ export interface TimesheetStoreState {
 const initialState: TimesheetStoreState = {
   contextUser: null,
   week: null,
+
   status: 'draft',
   version: '',
   datesInWeek: [],
+  forUser: undefined,
+
   entries: [],
-  selectedTaskIds: [],
   tasksById: {},
+  selectedTaskIds: [],
+
   cellByTaskDate: {},
   totalsPerDay: {},
   totalsPerTask: {},
   weekTotal: 0,
+
+  dayMeta: {},
+  blockedDates: {},
+  weekNav: [],
+
   loading: false,
   saving: false,
   dirty: false,
@@ -55,11 +81,11 @@ const initialState: TimesheetStoreState = {
 
 @Injectable({ providedIn: 'root' })
 export class TimesheetStore extends ComponentStore<TimesheetStoreState> {
-  constructor(private api: TimesheetService) {
+  constructor(private api: TimesheetService, private cal: CalendarService) {
     super(initialState);
   }
 
-  // =================== selectors ===================
+  // ============ selectors ============
   readonly vm$ = this.select((s) => ({
     week: s.week,
     status: s.status,
@@ -69,6 +95,9 @@ export class TimesheetStore extends ComponentStore<TimesheetStoreState> {
     taskById: s.tasksById,
     cellByTaskDate: s.cellByTaskDate,
     totals: { perDay: s.totalsPerDay, perTask: s.totalsPerTask, weekTotal: s.weekTotal },
+    dayMeta: s.dayMeta,
+    blockedDates: s.blockedDates,
+    weekNav: s.weekNav,
     loading: s.loading,
     saving: s.saving,
     dirty: s.dirty,
@@ -78,18 +107,12 @@ export class TimesheetStore extends ComponentStore<TimesheetStoreState> {
   readonly validation$ = this.select((s) => {
     const issues: ValidationIssue[] = [];
     for (const [date, total] of Object.entries(s.totalsPerDay)) {
-      if (total > 1) {
-        issues.push({
-          kind: 'DayOverCapacity',
-          message: `${date} exceeds 1.0 (${total})`,
-          context: { date, dayTotal: total },
-        });
-      }
+      if (total > 1) issues.push({ kind: 'DayOverCapacity', message: `${date} exceeds 1.0 (${total})`, context: { date, dayTotal: total } });
     }
     return { isValid: issues.length === 0, issues };
   });
 
-  // =================== updaters ===================
+  // ============ updaters ============
   readonly setLoading = this.updater<boolean>((s, loading) => ({ ...s, loading }));
   readonly setSaving = this.updater<boolean>((s, saving) => ({ ...s, saving }));
   readonly setDirty = this.updater<boolean>((s, dirty) => ({ ...s, dirty }));
@@ -100,33 +123,61 @@ export class TimesheetStore extends ComponentStore<TimesheetStoreState> {
   readonly setStatus = this.updater<TimesheetStatus>((s, status) => ({ ...s, status }));
   readonly setVersion = this.updater<string>((s, version) => ({ ...s, version }));
 
-  readonly loadSuccess = this.updater<TimesheetWeek>((s, ws) => {
-    const { entries, datesInWeek } = ws;
-    const { cellByTaskDate, totalsPerDay, totalsPerTask, weekTotal, selectedTaskIds, tasksById } = buildIndexes(entries);
+  /** Frame-only: set metadata (no entries or derived indexes). */
+  readonly applyWeekFrame = this.updater<Pick<TimesheetWeek, 'forUser' | 'status' | 'version' | 'datesInWeek'>>((s, f) => ({
+    ...s,
+    forUser: f.forUser ?? s.forUser,
+    status: f.status,
+    version: f.version,
+    datesInWeek: f.datesInWeek,
+    // reset per-week volatile bits until entries/meta arrive
+    entries: [],
+    cellByTaskDate: {},
+    totalsPerDay: {},
+    totalsPerTask: {},
+    weekTotal: 0,
+    dayMeta: {},
+    blockedDates: {},
+    weekNav: s.weekNav, // leave nav as-is until fetched
+    dirty: false,
+    error: null,
+  }));
+
+  /** Replace tasks dictionary. */
+  readonly setTasksDictionary = this.updater<Record<string, TaskRef>>((s, dict) => ({
+    ...s,
+    tasksById: { ...dict },
+  }));
+
+  /** Entries-only update: rebuild indexes and totals. */
+  readonly applyEntriesSuccess = this.updater<TimesheetEntry[]>((s, entries) => {
+    const { cellByTaskDate, totalsPerDay, totalsPerTask, weekTotal, selectedTaskIds } = buildIndexes(entries, s.selectedTaskIds, s.tasksById);
     return {
       ...s,
-      status: ws.status,
-      version: ws.version,
-      datesInWeek,
       entries,
-      selectedTaskIds,
-      tasksById,
       cellByTaskDate,
       totalsPerDay,
       totalsPerTask,
       weekTotal,
-      loading: false,
+      selectedTaskIds,
       dirty: false,
       error: null,
     };
   });
 
-  readonly loadFailure = this.updater<{ code: string; message: string }>((s, e) => ({
-    ...s,
-    loading: false,
-    error: e,
-  }));
+  readonly setWeekNav = this.updater<WeekNavItem[]>((s, items) => ({ ...s, weekNav: items || [] }));
 
+  /** Day meta (weekend/holiday) and derived blocked dates. */
+  readonly setDayMeta = this.updater<DayMetaMap>((s, meta) => {
+    const blocked: Record<DateYMD, true> = {};
+    for (const d of s.datesInWeek) {
+      const info = meta[d];
+      if (info && (info.isWeekend || info.isHoliday)) blocked[d] = true as const;
+    }
+    return { ...s, dayMeta: meta, blockedDates: blocked };
+  });
+
+  // Existing row/task/value updaters remain as you had them:
   readonly addTask = this.updater<TaskRef>((s, task) => {
     if (s.selectedTaskIds.includes(task.taskId)) return s;
     const tasksById = { ...s.tasksById, [task.taskId]: task };
@@ -139,26 +190,12 @@ export class TimesheetStore extends ComponentStore<TimesheetStoreState> {
     if (!s.selectedTaskIds.includes(taskId)) return s;
     const entries = s.entries.filter((e) => e.taskId !== taskId);
     const { cellByTaskDate, totalsPerDay, totalsPerTask, weekTotal, selectedTaskIds, tasksById } = buildIndexes(entries);
-    return {
-      ...s,
-      entries,
-      cellByTaskDate,
-      totalsPerDay,
-      totalsPerTask,
-      weekTotal,
-      selectedTaskIds,
-      tasksById,
-      dirty: true,
-    };
+    return { ...s, entries, cellByTaskDate, totalsPerDay, totalsPerTask, weekTotal, selectedTaskIds, tasksById, dirty: true };
   });
 
   readonly clearRow = this.updater<string>((s, taskId) => {
     const entries = s.entries.filter((e) => e.taskId !== taskId);
-    const { cellByTaskDate, totalsPerDay, totalsPerTask, weekTotal } = buildIndexes(
-      entries,
-      s.selectedTaskIds,
-      s.tasksById
-    );
+    const { cellByTaskDate, totalsPerDay, totalsPerTask, weekTotal } = buildIndexes(entries, s.selectedTaskIds, s.tasksById);
     return { ...s, entries, cellByTaskDate, totalsPerDay, totalsPerTask, weekTotal, dirty: true };
   });
 
@@ -166,57 +203,33 @@ export class TimesheetStore extends ComponentStore<TimesheetStoreState> {
     const old = s.cellByTaskDate[taskId]?.[date] ?? 0;
     if (old === value) return s;
 
-    // Update entries (upsert/remove)
     let entries: TimesheetEntry[];
     if (value === 0) {
       entries = s.entries.filter((e) => !(e.taskId === taskId && e.date === date));
     } else {
       let replaced = false;
-      entries = s.entries.map((e) => {
-        if (e.taskId === taskId && e.date === date) {
-          replaced = true;
-          return { ...e, value };
-        }
-        return e;
-      });
+      entries = s.entries.map((e) => (e.taskId === taskId && e.date === date ? ((replaced = true), { ...e, value }) : e));
       if (!replaced) entries = [...entries, { taskId, date, value }];
     }
 
-    // Delta totals
     const delta = (value as number) - (old as number);
     const totalsPerDay = { ...s.totalsPerDay, [date]: (s.totalsPerDay[date] || 0) + delta };
     const totalsPerTask = { ...s.totalsPerTask, [taskId]: (s.totalsPerTask[taskId] || 0) + delta };
     const weekTotal = s.weekTotal + delta;
 
-    // Cell map
-    const cellByTaskDate = { ...s.cellByTaskDate };
-    cellByTaskDate[taskId] = { ...(cellByTaskDate[taskId] || {}) };
-    if (value === 0) delete cellByTaskDate[taskId][date];
-    else cellByTaskDate[taskId][date] = value;
+    const cellByTaskDate = { ...s.cellByTaskDate, [taskId]: { ...(s.cellByTaskDate[taskId] || {}) } };
+    if (value === 0) delete cellByTaskDate[taskId][date]; else cellByTaskDate[taskId][date] = value;
 
-    // Ensure row exists in UI
     const selectedTaskIds = s.selectedTaskIds.includes(taskId) ? s.selectedTaskIds : [...s.selectedTaskIds, taskId];
 
-    return {
-      ...s,
-      entries,
-      totalsPerDay,
-      totalsPerTask,
-      weekTotal,
-      cellByTaskDate,
-      selectedTaskIds,
-      dirty: true,
-    };
+    return { ...s, entries, totalsPerDay, totalsPerTask, weekTotal, cellByTaskDate, selectedTaskIds, dirty: true };
   });
 
   readonly bulkSet = this.updater<{ taskId: string; dates: DateYMD[]; value: MDValue }>((s, { taskId, dates, value }) => {
     let entries = s.entries.slice();
     let totalsPerDay = { ...s.totalsPerDay } as Record<string, number>;
     let totalsPerTask = { ...s.totalsPerTask } as Record<string, number>;
-    let cellByTaskDate = {
-      ...s.cellByTaskDate,
-      [taskId]: { ...(s.cellByTaskDate[taskId] || {}) },
-    } as Record<string, Record<string, MDValue>>;
+    let cellByTaskDate = { ...s.cellByTaskDate, [taskId]: { ...(s.cellByTaskDate[taskId] || {}) } } as Record<string, Record<string, MDValue>>;
     let weekTotal = s.weekTotal;
 
     for (const date of dates) {
@@ -228,13 +241,7 @@ export class TimesheetStore extends ComponentStore<TimesheetStoreState> {
         delete cellByTaskDate[taskId][date];
       } else {
         let replaced = false;
-        entries = entries.map((e) => {
-          if (e.taskId === taskId && e.date === date) {
-            replaced = true;
-            return { ...e, value };
-          }
-          return e;
-        });
+        entries = entries.map((e) => (e.taskId === taskId && e.date === date ? ((replaced = true), { ...e, value }) : e));
         if (!replaced) entries.push({ taskId, date, value });
         cellByTaskDate[taskId][date] = value;
       }
@@ -246,7 +253,6 @@ export class TimesheetStore extends ComponentStore<TimesheetStoreState> {
     }
 
     const selectedTaskIds = s.selectedTaskIds.includes(taskId) ? s.selectedTaskIds : [...s.selectedTaskIds, taskId];
-
     return { ...s, entries, totalsPerDay, totalsPerTask, weekTotal, cellByTaskDate, selectedTaskIds, dirty: true };
   });
 
@@ -257,40 +263,45 @@ export class TimesheetStore extends ComponentStore<TimesheetStoreState> {
     return { ...s, selectedTaskIds: next };
   });
 
-  readonly applyDraftReplacement = this.updater<TimesheetWeek>((s, draft) => {
-    const { cellByTaskDate, totalsPerDay, totalsPerTask, weekTotal, selectedTaskIds, tasksById } = buildIndexes(draft.entries);
-    return {
-      ...s,
-      status: draft.status,
-      version: draft.version,
-      datesInWeek: draft.datesInWeek,
-      entries: draft.entries,
-      cellByTaskDate,
-      totalsPerDay,
-      totalsPerTask,
-      weekTotal,
-      selectedTaskIds,
-      tasksById,
-      dirty: true,
-    };
-  });
+  // ============ effects ============
 
-  readonly reset = this.updater<void>(() => initialState);
-
-  // =================== effects ===================
-
-  /** Load a week. Falls back to a DEV mock if the HTTP call fails (404, etc.) */
+  /** Full load with two-phase hydration:
+   * 1) load frame (status/version/dates),
+   * 2) parallel: tasks + entries + week-nav + day-meta,
+   * 3) apply tasks → entries → week-nav → day-meta
+   */
   readonly loadWeekEffect = this.effect<{ userId: string; week: WeekId }>((source$) =>
     source$.pipe(
       tap(() => this.setLoading(true)),
       switchMap(({ userId, week }) =>
-        this.api.loadWeek(userId, week).pipe(
-          tap((res) => this.loadSuccess(res)),
-          catchError(() => {
-            const ctx = this.get();
-            const mock = generateMockWeek(userId || ctx.contextUser?.userId || 'me', week, ctx.contextUser || undefined);
-            this.loadSuccess(mock);
-            return of(null);
+        // Phase 1: Frame
+        this.api.loadWeekFrame(userId, week).pipe(
+          catchError(() => of(generateMockFrame(userId, week, this.get().contextUser || undefined))),
+          tap((frame) => {
+            this.setWeek(week);
+            this.applyWeekFrame(frame);
+          }),
+          // Phase 2: Parallel fetches
+          switchMap((frame) => {
+            const dates = frame.datesInWeek && frame.datesInWeek.length ? frame.datesInWeek : this.get().datesInWeek;
+            return forkJoin({
+              tasks: this.api.loadTasksForWeek(userId, week).pipe(catchError(() => of([] as TaskRef[]))),
+              entries: this.api.loadEntriesForWeek(userId, week).pipe(catchError(() => of([] as TimesheetEntry[]))),
+              nav: this.api.getAdjacentWeeks(userId, week).pipe(
+                catchError(() => of(fallbackWeekNav(week, frame.status || 'draft')))
+              ),
+              meta: this.cal.getWeekMeta(userId, week).pipe(
+                catchError(() => of(computeWeekendOnlyMeta(dates)))
+              ),
+            });
+          }),
+          // Phase 3: Apply in order
+          tap(({ tasks, entries, nav, meta }) => {
+            const dict = buildTaskDictWithPlaceholders(tasks, entries);
+            this.setTasksDictionary(dict);
+            this.applyEntriesSuccess(normalizeEntries(entries));
+            this.setWeekNav(nav);
+            this.setDayMeta(meta);
           }),
           tap(() => this.setLoading(false))
         )
@@ -298,7 +309,7 @@ export class TimesheetStore extends ComponentStore<TimesheetStoreState> {
     )
   );
 
-  /** Save Draft. If HTTP fails, simulates success by bumping version and clearing dirty. */
+  /** Save Draft. (Mocks still allowed upstream) */
   readonly saveDraftEffect = this.effect<void>((trigger$) =>
     trigger$.pipe(
       exhaustMap(() => {
@@ -322,7 +333,7 @@ export class TimesheetStore extends ComponentStore<TimesheetStoreState> {
             this.setDirty(false);
           }),
           catchError(() => {
-            // DEV MOCK: pretend success
+            // DEV MOCK
             this.setVersion('W/"mock-save-1"');
             this.setDirty(false);
             return of(null);
@@ -333,7 +344,7 @@ export class TimesheetStore extends ComponentStore<TimesheetStoreState> {
     )
   );
 
-  /** Submit. If HTTP fails, simulates success by setting submitted + bumping version. */
+  /** Submit. (Mocks still allowed upstream) */
   readonly submitEffect = this.effect<void>((trigger$) =>
     trigger$.pipe(
       concatMap(() => {
@@ -348,12 +359,21 @@ export class TimesheetStore extends ComponentStore<TimesheetStoreState> {
             this.setStatus(r.status);
             this.setVersion(r.version);
             this.setDirty(false);
+            // Optimistically reflect in week-nav
+            const nav = (this.get().weekNav || []).map((i) =>
+              i.week.isoYear === s.week!.isoYear && i.week.isoWeek === s.week!.isoWeek ? { ...i, status: 'submitted' } : i
+            );
+            this.setWeekNav(nav);
           }),
           catchError(() => {
-            // DEV MOCK: pretend success
+            // DEV MOCK
             this.setStatus('submitted');
             this.setVersion('W/"mock-submit-1"');
             this.setDirty(false);
+            const nav = (this.get().weekNav || []).map((i) =>
+              i.week.isoYear === s.week!.isoYear && i.week.isoWeek === s.week!.isoWeek ? { ...i, status: 'submitted' } : i
+            );
+            this.setWeekNav(nav);
             return of(null);
           }),
           tap(() => this.setSaving(false))
@@ -361,46 +381,10 @@ export class TimesheetStore extends ComponentStore<TimesheetStoreState> {
       })
     )
   );
-
-  /** Optional: Apply a template. If HTTP fails, fills with a mock draft. */
-  readonly applyTemplateEffect = this.effect<{ templateId: string }>((source$) =>
-    source$.pipe(
-      switchMap(({ templateId }) => {
-        const s = this.get();
-        if (!s.contextUser || !s.week) return of(null);
-        return this.api.applyTemplate({ userId: s.contextUser.userId, week: s.week, templateId }).pipe(
-          tap((r) => this.applyDraftReplacement(r.draft)),
-          catchError(() => {
-            const mock = generateMockWeek(s.contextUser!.userId, s.week!, s.contextUser!);
-            this.applyDraftReplacement(mock);
-            return of(null);
-          })
-        );
-      })
-    )
-  );
-
-  /** Optional: Copy last week. If HTTP fails, fills with a mock draft. */
-  readonly copyLastWeekEffect = this.effect<{ mode: 'structure_only' | 'structure_and_values' }>((source$) =>
-    source$.pipe(
-      switchMap(({ mode }) => {
-        const s = this.get();
-        if (!s.contextUser || !s.week) return of(null);
-        const sourceWeek: WeekId = { isoYear: s.week.isoYear, isoWeek: Math.max(1, s.week.isoWeek - 1) };
-        return this.api.copyLastWeek({ userId: s.contextUser.userId, source: sourceWeek, target: s.week, mode }).pipe(
-          tap((r) => this.applyDraftReplacement(r.draft)),
-          catchError(() => {
-            const mock = generateMockWeek(s.contextUser!.userId, s.week!, s.contextUser!);
-            this.applyDraftReplacement(mock);
-            return of(null);
-          })
-        );
-      })
-    )
-  );
 }
 
-// =================== helpers ===================
+/* =================== helpers =================== */
+
 function buildIndexes(
   entries: TimesheetEntry[],
   keepRowOrder?: string[],
@@ -432,32 +416,110 @@ function buildIndexes(
   return { cellByTaskDate, totalsPerDay, totalsPerTask, weekTotal, selectedTaskIds: taskOrder, tasksById };
 }
 
-// --- DEV MOCKS ---
-function generateMockWeek(userId: string, week: WeekId, user?: UserRef): TimesheetWeek {
-  const datesInWeek = isoWeekToDates(week.isoYear, week.isoWeek);
-  const entries: TimesheetEntry[] = [
-    { taskId: 'T-101', date: datesInWeek[0], value: 0.5 },
-    { taskId: 'T-101', date: datesInWeek[1], value: 0.5 },
-    { taskId: 'T-101', date: datesInWeek[2], value: 0.25 },
-    { taskId: 'T-202', date: datesInWeek[2], value: 0.5 },
-    { taskId: 'T-202', date: datesInWeek[4], value: 1 },
+/** Build tasks dict and ensure placeholders exist for any taskId referenced by entries. */
+function buildTaskDictWithPlaceholders(tasks: TaskRef[], entries: TimesheetEntry[]): Record<string, TaskRef> {
+  const dict: Record<string, TaskRef> = {};
+  for (const t of tasks) dict[t.taskId] = t;
+  for (const e of entries) {
+    if (!dict[e.taskId]) {
+      dict[e.taskId] = {
+        taskId: e.taskId,
+        name: '(Unknown task)',
+        isActive: false,
+        project: { projectId: 'unknown', name: 'Unknown Project', isActive: false, client: { clientId: 'unknown', name: 'Unknown Client' } },
+      };
+    }
+  }
+  return dict;
+}
+
+/** Normalize entries to FE rules (drop zeros, clamp to [0,1] step .25 if needed). */
+function normalizeEntries(entries: TimesheetEntry[]): TimesheetEntry[] {
+  const allowed = new Set([0, 0.25, 0.5, 0.75, 1]);
+  const norm = (v: number) => {
+    if (allowed.has(v as any)) return v as MDValue;
+    const clamped = Math.min(1, Math.max(0, v));
+    const stepped = Math.round(clamped / 0.25) * 0.25;
+    return (allowed.has(stepped as any) ? (stepped as MDValue) : (0 as MDValue));
+  };
+  return entries
+    .map((e) => ({ ...e, value: norm(e.value as number) }))
+    .filter((e) => e.value !== 0);
+}
+
+/** Fallback week-nav if API fails: prev, current, next1, next2. */
+function fallbackWeekNav(center: WeekId, status: TimesheetStatus): WeekNavItem[] {
+  const prev = addIsoWeeks(center, -1);
+  const next1 = addIsoWeeks(center, 1);
+  const next2 = addIsoWeeks(center, 2);
+  return [
+    { key: 'prev', week: prev, status: 'draft' },
+    { key: 'current', week: center, status },
+    { key: 'next1', week: next1, status: 'draft' },
+    { key: 'next2', week: next2, status: 'draft' },
   ];
+}
+
+function addIsoWeeks(week: WeekId, delta: number): WeekId {
+  if (delta === 0) return week;
+  let { isoYear, isoWeek } = week;
+  let n = isoWeek + delta;
+  if (delta > 0) {
+    while (true) {
+      const max = weeksInIsoYear(isoYear);
+      if (n <= max) break;
+      n -= max;
+      isoYear += 1;
+    }
+  } else {
+    while (n < 1) {
+      isoYear -= 1;
+      n += weeksInIsoYear(isoYear);
+    }
+  }
+  return { isoYear, isoWeek: n };
+}
+
+function weeksInIsoYear(isoYear: number): number {
+  const dec28 = new Date(Date.UTC(isoYear, 11, 28));
+  return isoWeekFromDateUTC(dec28).isoWeek;
+}
+
+function isoWeekFromDateUTC(date: Date): WeekId {
+  const d = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+  const day = d.getUTCDay() || 7;
+  d.setUTCDate(d.getUTCDate() + 4 - day);
+  const isoYear = d.getUTCFullYear();
+  const yearStart = new Date(Date.UTC(isoYear, 0, 1));
+  const daysSinceYearStart = Math.floor((d.getTime() - yearStart.getTime()) / 86400000) + 1;
+  const isoWeek = Math.ceil(daysSinceYearStart / 7);
+  return { isoYear, isoWeek };
+}
+
+function computeWeekendOnlyMeta(dates: DateYMD[]): DayMetaMap {
+  const m: DayMetaMap = {};
+  for (const ymd of dates) {
+    const dow = new Date(ymd + 'T00:00:00Z').getUTCDay(); // 0=Sun .. 6=Sat
+    const isWeekend = dow === 0 || dow === 6;
+    m[ymd] = { isWeekend, isHoliday: false };
+  }
+  return m;
+}
+
+/* -------- DEV fallbacks for frame-only -------- */
+
+function generateMockFrame(userId: string, week: WeekId, user?: UserRef): Pick<TimesheetWeek, 'forUser' | 'status' | 'version' | 'datesInWeek'> {
   return {
-    week,
     forUser: user || { userId, displayName: 'Mock User', timezone: 'Europe/Lisbon' },
     status: 'draft',
-    version: 'W/"mock-load-1"',
-    datesInWeek,
-    entries,
-    lastModifiedBy: user,
-    lastModifiedAt: new Date().toISOString(),
+    version: 'W/"mock-frame-1"',
+    datesInWeek: isoWeekToDates(week.isoYear, week.isoWeek),
   };
 }
 
 function isoWeekToDates(isoYear: number, isoWeek: number): DateYMD[] {
-  // ISO week date: week 1 is the week with Jan 4th. Monday = day 1.
   const jan4 = new Date(Date.UTC(isoYear, 0, 4));
-  const jan4Day = jan4.getUTCDay() || 7; // 1..7 where 1=Mon, 7=Sun
+  const jan4Day = jan4.getUTCDay() || 7;
   const mondayWeek1 = new Date(jan4);
   mondayWeek1.setUTCDate(jan4.getUTCDate() - (jan4Day - 1));
   const start = new Date(mondayWeek1);
@@ -467,7 +529,7 @@ function isoWeekToDates(isoYear: number, isoWeek: number): DateYMD[] {
   for (let i = 0; i < 7; i++) {
     const d = new Date(start);
     d.setUTCDate(start.getUTCDate() + i);
-    days.push(d.toISOString().slice(0, 10)); // 'YYYY-MM-DD'
+    days.push(d.toISOString().slice(0, 10));
   }
   return days;
 }
